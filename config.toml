@@ -1,0 +1,15 @@
+# [[replacement]]
+# pattern = 'http://x.com'
+# to = 'https://fixupx.com'
+
+[[rule]]
+pattern = '(?:\bhttps?://)?(?:\bwww\.)?\bx\.com\b'
+to = 'https://fixupx.com'
+
+[[rule]]
+pattern = '(?:\bhttps?://)?(?:\bwww\.)?\btwitter\.com\b'
+to = 'https://fxtwitter.com'
+
+[[rule]]
+pattern = '(?:\bhttps?://)?(?:\bwww\.)?\bpixiv\.net/([^/]+/)?artworks/(\d+)'
+to = 'https://phixiv.net/${1}artworks/$2'

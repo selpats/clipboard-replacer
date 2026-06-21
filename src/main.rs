@@ -14,22 +14,39 @@ use serde::{Deserialize, Serialize};
 
 
 
-// Get the path for the log file
-fn get_log_path() -> PathBuf {
+// Get the path for a log file
+fn get_log_path(filename: &str) -> PathBuf {
     if let Ok(exe_path) = std::env::current_exe()
         && let Some(parent) = exe_path.parent() {
             let alt_path = parent.join("config.toml");
             // If the program is installed in AppData or config.toml is nearby, write log to the same directory
             if alt_path.exists() || exe_path.to_string_lossy().contains("AppData") {
-                return parent.join("replacer.log");
+                return parent.join(filename);
             }
         }
     std::env::current_dir()
-        .map(|p| p.join("replacer.log"))
-        .unwrap_or_else(|_| PathBuf::from("replacer.log"))
+        .map(|p| p.join(filename))
+        .unwrap_or_else(|_| PathBuf::from(filename))
 }
 
-// Write messages to the log file (and console, if available)
+fn write_to_log_file(path: &std::path::Path, content: &str) {
+    // Check log file size to prevent it from growing indefinitely (5 MB limit)
+    if let Ok(metadata) = std::fs::metadata(path)
+        && metadata.len() > 5 * 1024 * 1024 {
+            let _ = std::fs::write(path, "[Info] Log file cleared due to size limit exceeded (5 MB).\n");
+        }
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = file.write_all(content.as_bytes());
+    }
+}
+
+// Write messages to the log files (and console, if available)
 fn log_message(msg: &str, _is_error: bool) {
     let is_debug = DEBUG_MODE.load(Ordering::Relaxed);
     if !_is_error && !is_debug {
@@ -39,31 +56,14 @@ fn log_message(msg: &str, _is_error: bool) {
     let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
     let formatted = format!("[{}] {}\n", timestamp, msg);
 
-    // Output to console in debug builds
-    #[cfg(debug_assertions)]
-    {
-        if _is_error {
-            eprint!("{}", formatted);
-        } else {
-            print!("{}", formatted);
-        }
+    if _is_error {
+        let error_log_path = get_log_path("error.log");
+        write_to_log_file(&error_log_path, &formatted);
     }
 
-    let log_path = get_log_path();
-
-    // Check log file size to prevent it from growing indefinitely
-    if let Ok(metadata) = std::fs::metadata(&log_path)
-        && metadata.len() > 5 * 1024 * 1024 { // 5 MB limit
-            let _ = std::fs::write(&log_path, "[Info] Log file cleared due to size limit exceeded (5 MB).\n");
-        }
-
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
-        use std::io::Write;
-        let _ = file.write_all(formatted.as_bytes());
+    if is_debug {
+        let debug_log_path = get_log_path("debug.log");
+        write_to_log_file(&debug_log_path, &formatted);
     }
 }
 
@@ -280,6 +280,10 @@ fn main() {
     let ubo_rules_clone = Arc::clone(&ubo_rules);
     let cache_path_clone = cache_path.clone();
     std::thread::spawn(move || {
+        let mut retry_delay = Duration::from_secs(60); // Start retrying after 1 minute
+        let max_retry_delay = Duration::from_secs(60 * 60); // Maximum retry interval is 1 hour
+        let success_delay = Duration::from_secs(12 * 60 * 60); // 12 hours on success
+
         loop {
             log_info!("Fetching latest privacy-removeparam.txt from GitHub...");
             match fetch_and_save_rules(&cache_path_clone) {
@@ -291,12 +295,17 @@ fn main() {
                         && let Ok(mut w) = ubo_rules_clone.write() {
                             *w = new_rules;
                         }
+                    // Reset retry delay and sleep for 12 hours on success
+                    retry_delay = Duration::from_secs(60);
+                    std::thread::sleep(success_delay);
                 }
                 Err(e) => {
-                    log_error!("Failed to fetch privacy-removeparam.txt: {}", e);
+                    log_error!("Failed to fetch privacy-removeparam.txt: {}. Retrying in {} seconds...", e, retry_delay.as_secs());
+                    std::thread::sleep(retry_delay);
+                    // Double the delay for the next attempt, capped at 1 hour
+                    retry_delay = std::cmp::min(retry_delay * 2, max_retry_delay);
                 }
             }
-            std::thread::sleep(Duration::from_secs(12 * 60 * 60));
         }
     });
 

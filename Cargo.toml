@@ -10,3 +10,10 @@ regex = "1.12.4"
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.1.2"
 minreq = { version = "3.0.0", features = ["https-native-tls"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

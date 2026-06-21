@@ -336,7 +336,15 @@ fn main() {
                     let mut replaced_text = current_text.clone();
                     let mut changed = false;
 
-                    // Apply simple replacements first
+                    // Apply query parameter filtering based on uBlock Origin privacy rules first
+                    let rules_read_lock = ubo_rules.read().unwrap();
+                    let filtered_text = filter_query_parameters(&replaced_text, &rules_read_lock);
+                    if filtered_text != replaced_text {
+                        replaced_text = filtered_text;
+                        changed = true;
+                    }
+
+                    // Apply simple replacements next
                     for rep in &config_manager.replacements {
                         if replaced_text.contains(&rep.pattern) {
                             replaced_text = replaced_text.replace(&rep.pattern, &rep.to);
@@ -353,14 +361,6 @@ fn main() {
                                 changed = true;
                             }
                         }
-                    }
-
-                    // Apply query parameter filtering based on uBlock Origin privacy rules
-                    let rules_read_lock = ubo_rules.read().unwrap();
-                    let filtered_text = filter_query_parameters(&replaced_text, &rules_read_lock);
-                    if filtered_text != replaced_text {
-                        replaced_text = filtered_text;
-                        changed = true;
                     }
 
                     if changed {

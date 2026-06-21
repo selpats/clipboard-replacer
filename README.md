@@ -11,6 +11,7 @@
 - **Dual Replacement Engines**:
   - **Simple Substring Replacements**: Fast, literal match and replace (no regex overhead or escape issues).
   - **Regular Expression Rules**: Powerful pattern matching and replacement.
+- **Privacy Filtering**: Dynamically fetches the official uBlock Origin `privacy-removeparam.txt` ruleset to strip out tracking parameters (e.g., `utm_source`, `si`, `fbclid`, `gclid`) from copied URLs.
 - **Log Management**: Writes to a self-cleaning log file (`replacer.log`) capped at 5 MB to prevent disk bloat.
   - *Normal Mode*: Only logs critical errors.
   - *Debug Mode* (`--debug` or `-d`): Logs every replacement action and rule loading status.
@@ -71,6 +72,15 @@ to = 'https://phixiv.net/${1}artworks/$2'
 - **`[[rule]]`**:
   - `pattern`: A regular expression pattern. Single quotes (`'...'`) are recommended to avoid double-escaping backslashes.
   - `to`: The string or pattern capture group to replace the match with.
+
+---
+
+## Tracking Parameter Filtering (uBlock Origin)
+
+`clipboard-replacer` includes a built-in privacy engine that automatically removes tracking parameters from URLs:
+- **Zero Configuration**: You do not need to configure anything in `config.toml`. The utility dynamically fetches the latest filters from the official [uBlock Origin uAssets repository](https://github.com/uBlockOrigin/uAssets).
+- **Background Updates**: The program downloads the latest ruleset (`privacy-removeparam.txt`) in the background once every 12 hours. It caches the file locally in its install folder so it can operate offline immediately on startup.
+- **Rules Engine**: Supports global parameters, domain-restricted parameters, negative rules (exceptions), and regular expressions as defined in the uBlock Origin filter format.
 
 ---
 

@@ -91,11 +91,20 @@ struct Rule {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+struct QueryFilter {
+    domain: String,
+    allow: Option<Vec<String>>,
+    forbid: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 struct Config {
     #[serde(default)]
     replacement: Vec<SimpleReplacement>,
     #[serde(default)]
     rule: Vec<Rule>,
+    #[serde(default)]
+    query_filter: Vec<QueryFilter>,
 }
 
 struct CompiledRule {
@@ -109,6 +118,7 @@ struct ConfigManager {
     last_modified: Option<SystemTime>,
     replacements: Vec<SimpleReplacement>,
     rules: Vec<CompiledRule>,
+    query_filters: Vec<QueryFilter>,
 }
 
 impl ConfigManager {
@@ -134,6 +144,7 @@ impl ConfigManager {
             last_modified: None,
             replacements: Vec::new(),
             rules: Vec::new(),
+            query_filters: Vec::new(),
         }
     }
 
@@ -155,6 +166,34 @@ to = 'https://fxtwitter.com'
 [[rule]]
 pattern = '(?:\bhttps?://)?(?:\bwww\.)?\bpixiv\.net/([^/]+/)?artworks/(\d+)'
 to = 'https://phixiv.net/${1}artworks/$2'
+
+[[query_filter]]
+domain = 'x.com'
+forbid = ['*']
+
+[[query_filter]]
+domain = 'twitter.com'
+forbid = ['*']
+
+[[query_filter]]
+domain = 'fixupx.com'
+forbid = ['*']
+
+[[query_filter]]
+domain = 'fxtwitter.com'
+forbid = ['*']
+
+[[query_filter]]
+domain = 'youtube.com'
+allow = ['t', 'list', 'v']
+
+[[query_filter]]
+domain = 'music.youtube.com'
+allow = ['t', 'list', 'v']
+
+[[query_filter]]
+domain = 'youtu.be'
+allow = ['t', 'list', 'v']
 "#;
             if let Err(e) = std::fs::write(&self.path, default_config) {
                 log_error!("Failed to create default configuration file: {}", e);
@@ -201,8 +240,13 @@ to = 'https://phixiv.net/${1}artworks/$2'
                             for r in &new_rules {
                                 log_info!("  - '{}' -> '{}'", r.pattern, r.to);
                             }
+                            log_info!("Successfully loaded query filters: {}", raw_config.query_filter.len());
+                            for q in &raw_config.query_filter {
+                                log_info!("  - domain: '{}', allow: {:?}, forbid: {:?}", q.domain, q.allow, q.forbid);
+                            }
                             self.replacements = raw_config.replacement;
                             self.rules = new_rules;
+                            self.query_filters = raw_config.query_filter;
                             self.last_modified = current_modified;
                         }
                         Err(e) => {
@@ -284,8 +328,8 @@ fn main() {
                         }
                     }
 
-                    // Apply query parameter filtering for Twitter/X and YouTube
-                    let filtered_text = filter_query_parameters(&replaced_text);
+                    // Apply query parameter filtering based on config rules
+                    let filtered_text = filter_query_parameters(&replaced_text, &config_manager.query_filters);
                     if filtered_text != replaced_text {
                         replaced_text = filtered_text;
                         changed = true;
@@ -333,8 +377,26 @@ fn strip_trailing_punctuation(s: &str) -> (&str, &str) {
     (&s[..end_idx], &s[end_idx..])
 }
 
-fn process_query_string(domain: &str, query_str: &str) -> String {
-    let domain_lower = domain.to_lowercase();
+fn domain_matches(url_domain: &str, config_domain: &str) -> bool {
+    let url_domain_lower = url_domain.to_lowercase();
+    let config_domain_lower = config_domain.to_lowercase();
+    
+    if url_domain_lower == config_domain_lower {
+        return true;
+    }
+    
+    if url_domain_lower.ends_with(&format!(".{}", config_domain_lower)) {
+        return true;
+    }
+    
+    false
+}
+
+fn escape_domain(domain: &str) -> String {
+    domain.replace('.', r"\.").replace('-', r"\-")
+}
+
+fn process_query_string(filter: &QueryFilter, query_str: &str) -> String {
     let mut kept_params = Vec::new();
     for pair in query_str.split('&') {
         if pair.is_empty() {
@@ -344,14 +406,21 @@ fn process_query_string(domain: &str, query_str: &str) -> String {
         if let Some(key) = parts.next() {
             let value = parts.next().unwrap_or("");
             
-            let is_allowed = if domain_lower.contains("youtube.com") || domain_lower == "youtu.be" {
-                key == "t" || key == "list" || key == "v"
-            } else {
-                // Twitter / X / fixupx / fxtwitter
-                false
-            };
+            let mut keep = true;
             
-            if is_allowed {
+            if let Some(ref allow_list) = filter.allow {
+                keep = allow_list.iter().any(|allowed_key| allowed_key == key);
+            }
+            
+            if keep {
+                if let Some(ref forbid_list) = filter.forbid {
+                    if forbid_list.iter().any(|forbidden_key| forbidden_key == "*" || forbidden_key == key) {
+                        keep = false;
+                    }
+                }
+            }
+            
+            if keep {
                 if value.is_empty() {
                     kept_params.push(key.to_string());
                 } else {
@@ -368,12 +437,28 @@ fn process_query_string(domain: &str, query_str: &str) -> String {
     }
 }
 
-fn filter_query_parameters(text: &str) -> String {
-    // Regex matching the targeted domains
-    // Matches: protocol, www, domain, path, query, fragment
-    let url_re = Regex::new(
-        r"(?i)(?:\b(https?://))?(?:\b(www\.))?\b(youtube\.com|music\.youtube\.com|youtu\.be|twitter\.com|x\.com|fixupx\.com|fxtwitter\.com)\b(/[^?\s#]*)?(\?[^\s#]*)?(#[^\s]*)?"
-    ).unwrap();
+fn filter_query_parameters(text: &str, query_filters: &[QueryFilter]) -> String {
+    let escaped_domains: Vec<String> = query_filters
+        .iter()
+        .map(|f| escape_domain(&f.domain))
+        .collect();
+
+    if escaped_domains.is_empty() {
+        return text.to_string();
+    }
+
+    let domain_pattern = escaped_domains.join("|");
+    let regex_str = format!(
+        r"(?i)(?:\b(https?://))?(?:\b(www\.))?\b({})\b(/[^?\s#]*)?(\?[^\s#]*)?(#[^\s]*)?",
+        domain_pattern
+    );
+    let url_re = match Regex::new(&regex_str) {
+        Ok(re) => re,
+        Err(e) => {
+            log_error!("Failed to compile dynamic query filter regex: {}", e);
+            return text.to_string();
+        }
+    };
 
     url_re.replace_all(text, |caps: &regex::Captures| {
         let protocol = caps.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -387,36 +472,44 @@ fn filter_query_parameters(text: &str) -> String {
         let domain_match = caps.get(3).unwrap();
         if let Some(c) = text[domain_match.end()..].chars().next() {
             if c == '.' || c.is_alphanumeric() || c == '-' {
-                // Return the whole match unchanged
                 return caps.get(0).unwrap().as_str().to_string();
             }
         }
 
-        let mut clean_query = String::new();
-        let mut trailing_punct = "";
+        // Find matching filter config
+        let filter_config = query_filters.iter().find(|f| domain_matches(domain, &f.domain));
+        
+        let clean_query = if let Some(filter) = filter_config {
+            let mut cq = String::new();
+            let mut trailing_punct = "";
 
-        // Determine which part has trailing punctuation
-        let mut clean_fragment = String::new();
-        if !fragment.is_empty() {
-            let (f_base, f_punct) = strip_trailing_punctuation(fragment);
-            clean_fragment = f_base.to_string();
-            trailing_punct = f_punct;
+            let mut clean_fragment = String::new();
+            if !fragment.is_empty() {
+                let (f_base, f_punct) = strip_trailing_punctuation(fragment);
+                clean_fragment = f_base.to_string();
+                trailing_punct = f_punct;
+                
+                if !query_with_question.is_empty() {
+                    let query_str = &query_with_question[1..];
+                    cq = process_query_string(filter, query_str);
+                }
+            } else if !query_with_question.is_empty() {
+                let (q_base, q_punct) = strip_trailing_punctuation(query_with_question);
+                trailing_punct = q_punct;
+                if q_base.len() > 1 {
+                    let query_str = &q_base[1..];
+                    cq = process_query_string(filter, query_str);
+                }
+            }
             
-            if !query_with_question.is_empty() {
-                // If we have a fragment, the query string doesn't have trailing punctuation (the fragment does)
-                let query_str = &query_with_question[1..];
-                clean_query = process_query_string(domain, query_str);
-            }
-        } else if !query_with_question.is_empty() {
-            let (q_base, q_punct) = strip_trailing_punctuation(query_with_question);
-            trailing_punct = q_punct;
-            if q_base.len() > 1 {
-                let query_str = &q_base[1..];
-                clean_query = process_query_string(domain, query_str);
-            }
-        }
+            // Reconstruct the URL query, fragment, and trailing punctuation
+            format!("{}{}{}", cq, clean_fragment, trailing_punct)
+        } else {
+            // No filter configured, return query, fragment, and punctuation unmodified
+            format!("{}{}", query_with_question, fragment)
+        };
 
-        format!("{}{}{}{}{}{}{}", protocol, www, domain, path, clean_query, clean_fragment, trailing_punct)
+        format!("{}{}{}{}{}", protocol, www, domain, path, clean_query)
     }).into_owned()
 }
 
@@ -475,42 +568,80 @@ mod tests {
 
     #[test]
     fn test_filter_query_parameters() {
+        let query_filters = vec![
+            QueryFilter {
+                domain: "x.com".to_string(),
+                allow: None,
+                forbid: Some(vec!["*".to_string()]),
+            },
+            QueryFilter {
+                domain: "twitter.com".to_string(),
+                allow: None,
+                forbid: Some(vec!["*".to_string()]),
+            },
+            QueryFilter {
+                domain: "fixupx.com".to_string(),
+                allow: None,
+                forbid: Some(vec!["*".to_string()]),
+            },
+            QueryFilter {
+                domain: "fxtwitter.com".to_string(),
+                allow: None,
+                forbid: Some(vec!["*".to_string()]),
+            },
+            QueryFilter {
+                domain: "youtube.com".to_string(),
+                allow: Some(vec!["t".to_string(), "list".to_string(), "v".to_string()]),
+                forbid: None,
+            },
+            QueryFilter {
+                domain: "music.youtube.com".to_string(),
+                allow: Some(vec!["t".to_string(), "list".to_string(), "v".to_string()]),
+                forbid: None,
+            },
+            QueryFilter {
+                domain: "youtu.be".to_string(),
+                allow: Some(vec!["t".to_string(), "list".to_string(), "v".to_string()]),
+                forbid: None,
+            },
+        ];
+
         // Twitter/X: strip all queries
         assert_eq!(
-            filter_query_parameters("https://x.com/user/status/123?s=20&t=456"),
+            filter_query_parameters("https://x.com/user/status/123?s=20&t=456", &query_filters),
             "https://x.com/user/status/123"
         );
         assert_eq!(
-            filter_query_parameters("http://www.twitter.com/user/status/123?s=20#ref"),
+            filter_query_parameters("http://www.twitter.com/user/status/123?s=20#ref", &query_filters),
             "http://www.twitter.com/user/status/123#ref"
         );
         assert_eq!(
-            filter_query_parameters("x.com/status/123?s=20&t=abc."),
+            filter_query_parameters("x.com/status/123?s=20&t=abc.", &query_filters),
             "x.com/status/123."
         );
 
         // YouTube: keep only t, list, v
         assert_eq!(
-            filter_query_parameters("https://youtube.com/watch?v=abc&si=def&t=10"),
+            filter_query_parameters("https://youtube.com/watch?v=abc&si=def&t=10", &query_filters),
             "https://youtube.com/watch?v=abc&t=10"
         );
         assert_eq!(
-            filter_query_parameters("https://music.youtube.com/watch?v=abc&si=def&list=xyz&extra=123"),
+            filter_query_parameters("https://music.youtube.com/watch?v=abc&si=def&list=xyz&extra=123", &query_filters),
             "https://music.youtube.com/watch?v=abc&list=xyz"
         );
         assert_eq!(
-            filter_query_parameters("youtu.be/abc?si=def&t=5"),
+            filter_query_parameters("youtu.be/abc?si=def&t=5", &query_filters),
             "youtu.be/abc?t=5"
         );
         assert_eq!(
-            filter_query_parameters("youtu.be/abc?si=def"),
+            filter_query_parameters("youtu.be/abc?si=def", &query_filters),
             "youtu.be/abc"
         );
         
         // Complex text containing links
         let input_text = "Check this: https://youtube.com/watch?v=abc&si=def and also x.com/user/status/123?s=20.";
         let expected_text = "Check this: https://youtube.com/watch?v=abc and also x.com/user/status/123.";
-        assert_eq!(filter_query_parameters(input_text), expected_text);
+        assert_eq!(filter_query_parameters(input_text, &query_filters), expected_text);
     }
 }
 

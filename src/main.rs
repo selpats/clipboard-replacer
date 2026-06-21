@@ -428,11 +428,34 @@ struct UboRule {
     domains: Box<[Box<str>]>,
     excluded_domains: Box<[Box<str>]>,
     is_global: bool,
+    url_pattern: Option<Regex>,
+}
+
+fn wildcard_to_regex(pattern: &str) -> Option<Regex> {
+    if pattern.is_empty() || pattern == "*" {
+        return None;
+    }
+    let mut regex_str = String::new();
+    for c in pattern.chars() {
+        match c {
+            '*' => regex_str.push_str(".*"),
+            '?' => regex_str.push_str("\\?"),
+            '.' => regex_str.push_str("\\."),
+            '+' => regex_str.push_str("\\+"),
+            '^' => regex_str.push_str("[/?:&=#]"),
+            '(' | ')' | '[' | ']' | '{' | '}' | '|' | '$' | '\\' => {
+                regex_str.push('\\');
+                regex_str.push(c);
+            }
+            _ => regex_str.push(c),
+        }
+    }
+    Regex::new(&regex_str).ok()
 }
 
 fn parse_ubo_line(line: &str) -> Option<UboRule> {
     let line = line.trim();
-    if line.is_empty() || line.starts_with('!') || line.starts_with('#') {
+    if line.is_empty() || line.starts_with('!') || line.starts_with('#') || line.starts_with("@@") {
         return None;
     }
 
@@ -443,6 +466,16 @@ fn parse_ubo_line(line: &str) -> Option<UboRule> {
     }
     if left.ends_with('$') || left.ends_with(',') {
         left = &left[..left.len() - 1];
+    }
+
+    let left_clean = left.trim();
+    let mut url_pattern = None;
+    if !left_clean.is_empty()
+        && !left_clean.starts_with("||")
+        && !left_clean.starts_with('$')
+        && left_clean != "*"
+    {
+        url_pattern = wildcard_to_regex(left_clean);
     }
 
     let right = &line[removeparam_idx..];
@@ -530,6 +563,7 @@ fn parse_ubo_line(line: &str) -> Option<UboRule> {
         domains: domains.into_boxed_slice(),
         excluded_domains: excluded_domains.into_boxed_slice(),
         is_global,
+        url_pattern,
     })
 }
 
@@ -574,7 +608,7 @@ fn fetch_and_save_rules(cache_path: &std::path::Path) -> Result<String, String> 
     Ok(body.to_string())
 }
 
-fn should_filter_param(url_domain: &str, param_name: &str, rules: &[UboRule]) -> bool {
+fn should_filter_param(url_domain: &str, full_url: &str, param_name: &str, rules: &[UboRule]) -> bool {
     for rule in rules {
         let param_matches = if rule.is_regex {
             if let Some(ref re) = rule.regex {
@@ -588,6 +622,12 @@ fn should_filter_param(url_domain: &str, param_name: &str, rules: &[UboRule]) ->
 
         if !param_matches {
             continue;
+        }
+
+        if let Some(ref url_re) = rule.url_pattern {
+            if !url_re.is_match(full_url) {
+                continue;
+            }
         }
 
         let mut is_excluded = false;
@@ -615,7 +655,7 @@ fn should_filter_param(url_domain: &str, param_name: &str, rules: &[UboRule]) ->
     false
 }
 
-fn process_query_string_ubo(domain: &str, query_str: &str, rules: &[UboRule]) -> String {
+fn process_query_string_ubo(domain: &str, full_url: &str, query_str: &str, rules: &[UboRule]) -> String {
     let mut kept_params = Vec::new();
     for pair in query_str.split('&') {
         if pair.is_empty() {
@@ -625,7 +665,7 @@ fn process_query_string_ubo(domain: &str, query_str: &str, rules: &[UboRule]) ->
         if let Some(key) = parts.next() {
             let value = parts.next().unwrap_or("");
             
-            let should_remove = should_filter_param(domain, key, rules);
+            let should_remove = should_filter_param(domain, full_url, key, rules);
             
             if !should_remove {
                 if value.is_empty() {
@@ -667,6 +707,7 @@ fn filter_query_parameters(text: &str, ubo_rules: &[UboRule]) -> String {
                 return caps.get(0).unwrap().as_str().to_string();
             }
 
+        let full_url = caps.get(0).unwrap().as_str();
         let mut clean_query = String::new();
         let trailing_punct;
 
@@ -677,13 +718,13 @@ fn filter_query_parameters(text: &str, ubo_rules: &[UboRule]) -> String {
             trailing_punct = f_punct;
             
             let query_str = &query_with_question[1..];
-            clean_query = process_query_string_ubo(domain, query_str, ubo_rules);
+            clean_query = process_query_string_ubo(domain, full_url, query_str, ubo_rules);
         } else {
             let (q_base, q_punct) = strip_trailing_punctuation(query_with_question);
             trailing_punct = q_punct;
             if q_base.len() > 1 {
                 let query_str = &q_base[1..];
-                clean_query = process_query_string_ubo(domain, query_str, ubo_rules);
+                clean_query = process_query_string_ubo(domain, full_url, query_str, ubo_rules);
             }
         }
 
@@ -772,8 +813,8 @@ mod tests {
             "http://www.twitter.com/user/status/123#ref"
         );
         assert_eq!(
-            filter_query_parameters("x.com/status/123?s=20&t=abc.", &query_filters),
-            "x.com/status/123."
+            filter_query_parameters("x.com/user/status/123?s=20&t=abc.", &query_filters),
+            "x.com/user/status/123."
         );
 
         // YouTube: remove si

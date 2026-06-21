@@ -62,18 +62,6 @@ to = 'https://fixupx.com'
 pattern = '(?:\bhttps?://)?(?:\bwww\.)?\bpixiv\.net/([^/]+/)?artworks/(\d+)'
 to = 'https://phixiv.net/${1}artworks/$2'
 
-# 3. Query parameter filtering (per domain)
-[[query_filter]]
-domain = 'x.com'
-forbid = ['*']     # Remove all query parameters
-
-[[query_filter]]
-domain = 'youtube.com'
-allow = ['t', 'list', 'v'] # Whitelist: keep ONLY t, list, and v, remove everything else
-
-[[query_filter]]
-domain = 'example.com'
-forbid = ['utm_source', 'utm_medium'] # Blacklist: remove specific tracking parameters, keep the rest
 ```
 
 ### Explanation of Fields:
@@ -83,10 +71,6 @@ forbid = ['utm_source', 'utm_medium'] # Blacklist: remove specific tracking para
 - **`[[rule]]`**:
   - `pattern`: A regular expression pattern. Single quotes (`'...'`) are recommended to avoid double-escaping backslashes.
   - `to`: The string or pattern capture group to replace the match with.
-- **`[[query_filter]]`**:
-  - `domain`: The target domain name (e.g., `x.com`, `youtube.com`). Subdomains are automatically matched.
-  - `allow` (optional): Whitelist of query parameter keys to keep.
-  - `forbid` (optional): Blacklist of query parameter keys to remove. Use `*` to block all parameters.
 
 ---
 

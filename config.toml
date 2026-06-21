@@ -13,31 +13,3 @@ to = 'https://fxtwitter.com'
 [[rule]]
 pattern = '(?:\bhttps?://)?(?:\bwww\.)?\bpixiv\.net/([^/]+/)?artworks/(\d+)'
 to = 'https://phixiv.net/${1}artworks/$2'
-
-[[query_filter]]
-domain = 'x.com'
-forbid = ['*']
-
-[[query_filter]]
-domain = 'twitter.com'
-forbid = ['*']
-
-[[query_filter]]
-domain = 'fixupx.com'
-forbid = ['*']
-
-[[query_filter]]
-domain = 'fxtwitter.com'
-forbid = ['*']
-
-[[query_filter]]
-domain = 'youtube.com'
-allow = ['t', 'list', 'v']
-
-[[query_filter]]
-domain = 'music.youtube.com'
-allow = ['t', 'list', 'v']
-
-[[query_filter]]
-domain = 'youtu.be'
-allow = ['t', 'list', 'v']

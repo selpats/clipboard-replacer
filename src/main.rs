@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::thread;
 
 static DEBUG_MODE: AtomicBool = AtomicBool::new(false);
@@ -9,19 +10,20 @@ use std::time::{Duration, SystemTime};
 use arboard::Clipboard;
 use chrono::Local;
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+
 
 // Get the path for the log file
 fn get_log_path() -> PathBuf {
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(parent) = exe_path.parent() {
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(parent) = exe_path.parent() {
             let alt_path = parent.join("config.toml");
             // If the program is installed in AppData or config.toml is nearby, write log to the same directory
             if alt_path.exists() || exe_path.to_string_lossy().contains("AppData") {
                 return parent.join("replacer.log");
             }
         }
-    }
     std::env::current_dir()
         .map(|p| p.join("replacer.log"))
         .unwrap_or_else(|_| PathBuf::from("replacer.log"))
@@ -50,11 +52,10 @@ fn log_message(msg: &str, _is_error: bool) {
     let log_path = get_log_path();
 
     // Check log file size to prevent it from growing indefinitely
-    if let Ok(metadata) = std::fs::metadata(&log_path) {
-        if metadata.len() > 5 * 1024 * 1024 { // 5 MB limit
+    if let Ok(metadata) = std::fs::metadata(&log_path)
+        && metadata.len() > 5 * 1024 * 1024 { // 5 MB limit
             let _ = std::fs::write(&log_path, "[Info] Log file cleared due to size limit exceeded (5 MB).\n");
         }
-    }
 
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
@@ -78,33 +79,46 @@ macro_rules! log_error {
     };
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct SimpleReplacement {
     pattern: String,
     to: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct Rule {
     pattern: String,
     to: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
-struct QueryFilter {
-    domain: String,
-    allow: Option<Vec<String>>,
-    forbid: Option<Vec<String>>,
-}
-
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 struct Config {
     #[serde(default)]
     replacement: Vec<SimpleReplacement>,
     #[serde(default)]
     rule: Vec<Rule>,
-    #[serde(default)]
-    query_filter: Vec<QueryFilter>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            replacement: Vec::new(),
+            rule: vec![
+                Rule {
+                    pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\bx\.com\b".to_string(),
+                    to: "https://fixupx.com".to_string(),
+                },
+                Rule {
+                    pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\btwitter\.com\b".to_string(),
+                    to: "https://fxtwitter.com".to_string(),
+                },
+                Rule {
+                    pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\bpixiv\.net/([^/]+/)?artworks/(\d+)".to_string(),
+                    to: "https://phixiv.net/${1}artworks/$2".to_string(),
+                },
+            ],
+        }
+    }
 }
 
 struct CompiledRule {
@@ -118,7 +132,6 @@ struct ConfigManager {
     last_modified: Option<SystemTime>,
     replacements: Vec<SimpleReplacement>,
     rules: Vec<CompiledRule>,
-    query_filters: Vec<QueryFilter>,
 }
 
 impl ConfigManager {
@@ -128,78 +141,46 @@ impl ConfigManager {
             .unwrap_or_else(|_| PathBuf::from("config.toml"));
 
         // If config doesn't exist in CWD, look next to the executable
-        if !path.exists() {
-            if let Ok(exe_path) = std::env::current_exe() {
-                if let Some(parent) = exe_path.parent() {
+        if !path.exists()
+            && let Ok(exe_path) = std::env::current_exe()
+                && let Some(parent) = exe_path.parent() {
                     let alt_path = parent.join("config.toml");
                     if alt_path.exists() {
                         path = alt_path;
                     }
                 }
-            }
-        }
 
         Self {
             path,
             last_modified: None,
             replacements: Vec::new(),
             rules: Vec::new(),
-            query_filters: Vec::new(),
         }
     }
 
     fn check_and_reload(&mut self) {
         // Create default config if it doesn't exist
         if !self.path.exists() {
-            let default_config = r#"# [[replacement]]
-# pattern = 'http://x.com'
-# to = 'https://fixupx.com'
-
-[[rule]]
-pattern = '(?:\bhttps?://)?(?:\bwww\.)?\bx\.com\b'
-to = 'https://fixupx.com'
-
-[[rule]]
-pattern = '(?:\bhttps?://)?(?:\bwww\.)?\btwitter\.com\b'
-to = 'https://fxtwitter.com'
-
-[[rule]]
-pattern = '(?:\bhttps?://)?(?:\bwww\.)?\bpixiv\.net/([^/]+/)?artworks/(\d+)'
-to = 'https://phixiv.net/${1}artworks/$2'
-
-[[query_filter]]
-domain = 'x.com'
-forbid = ['*']
-
-[[query_filter]]
-domain = 'twitter.com'
-forbid = ['*']
-
-[[query_filter]]
-domain = 'fixupx.com'
-forbid = ['*']
-
-[[query_filter]]
-domain = 'fxtwitter.com'
-forbid = ['*']
-
-[[query_filter]]
-domain = 'youtube.com'
-allow = ['t', 'list', 'v']
-
-[[query_filter]]
-domain = 'music.youtube.com'
-allow = ['t', 'list', 'v']
-
-[[query_filter]]
-domain = 'youtu.be'
-allow = ['t', 'list', 'v']
-"#;
-            if let Err(e) = std::fs::write(&self.path, default_config) {
-                log_error!("Failed to create default configuration file: {}", e);
-                return;
+            match toml::to_string_pretty(&Config::default()) {
+                Ok(toml_string) => {
+                    let commented_toml = format!(
+                        "# [[replacement]]\n\
+                         # pattern = 'http://x.com'\n\
+                         # to = 'https://fixupx.com'\n\n\
+                         {}",
+                        toml_string
+                    );
+                    if let Err(e) = std::fs::write(&self.path, commented_toml) {
+                        log_error!("Failed to create default configuration file: {}", e);
+                        return;
+                    }
+                    log_info!("Created default configuration file: {:?}", self.path);
+                }
+                Err(e) => {
+                    log_error!("Failed to serialize default config: {}", e);
+                    return;
+                }
             }
-            log_info!("Created default configuration file: {:?}", self.path);
         }
 
         let current_modified = std::fs::metadata(&self.path)
@@ -240,13 +221,8 @@ allow = ['t', 'list', 'v']
                             for r in &new_rules {
                                 log_info!("  - '{}' -> '{}'", r.pattern, r.to);
                             }
-                            log_info!("Successfully loaded query filters: {}", raw_config.query_filter.len());
-                            for q in &raw_config.query_filter {
-                                log_info!("  - domain: '{}', allow: {:?}, forbid: {:?}", q.domain, q.allow, q.forbid);
-                            }
                             self.replacements = raw_config.replacement;
                             self.rules = new_rules;
-                            self.query_filters = raw_config.query_filter;
                             self.last_modified = current_modified;
                         }
                         Err(e) => {
@@ -282,6 +258,48 @@ fn main() {
     let mut config_manager = ConfigManager::new();
     config_manager.check_and_reload();
 
+    // Set up and load privacy parameters rules from uBlock Origin list
+    let cache_path = get_cache_path();
+    let mut initial_rules = Vec::new();
+    
+    if cache_path.exists() {
+        match std::fs::read_to_string(&cache_path) {
+            Ok(content) => {
+                initial_rules = parse_rules_from_str(&content);
+                log_info!("Loaded {} rules from local cache: {:?}", initial_rules.len(), cache_path);
+            }
+            Err(e) => {
+                log_error!("Failed to read cached rules: {}", e);
+            }
+        }
+    }
+    
+    let ubo_rules = Arc::new(RwLock::new(initial_rules));
+    
+    // Background thread to download/update the rules file from GitHub every 12 hours
+    let ubo_rules_clone = Arc::clone(&ubo_rules);
+    let cache_path_clone = cache_path.clone();
+    std::thread::spawn(move || {
+        loop {
+            log_info!("Fetching latest privacy-removeparam.txt from GitHub...");
+            match fetch_and_save_rules(&cache_path_clone) {
+                Ok(content) => {
+                    log_info!("Successfully downloaded privacy-removeparam.txt.");
+                    let new_rules = parse_rules_from_str(&content);
+                    log_info!("Parsed {} rules from downloaded file.", new_rules.len());
+                    if !new_rules.is_empty()
+                        && let Ok(mut w) = ubo_rules_clone.write() {
+                            *w = new_rules;
+                        }
+                }
+                Err(e) => {
+                    log_error!("Failed to fetch privacy-removeparam.txt: {}", e);
+                }
+            }
+            std::thread::sleep(Duration::from_secs(12 * 60 * 60));
+        }
+    });
+
     let mut last_clipboard_content: Option<String> = None;
     if let Ok(text) = clipboard.get_text() {
         last_clipboard_content = Some(text);
@@ -291,7 +309,7 @@ fn main() {
 
     loop {
         // Check for config modifications every 2 seconds (4 iterations)
-        if loop_count % 4 == 0 {
+        if loop_count.is_multiple_of(4) {
             config_manager.check_and_reload();
         }
         loop_count = loop_count.wrapping_add(1);
@@ -328,8 +346,9 @@ fn main() {
                         }
                     }
 
-                    // Apply query parameter filtering based on config rules
-                    let filtered_text = filter_query_parameters(&replaced_text, &config_manager.query_filters);
+                    // Apply query parameter filtering based on uBlock Origin privacy rules
+                    let rules_read_lock = ubo_rules.read().unwrap();
+                    let filtered_text = filter_query_parameters(&replaced_text, &rules_read_lock);
                     if filtered_text != replaced_text {
                         replaced_text = filtered_text;
                         changed = true;
@@ -392,11 +411,202 @@ fn domain_matches(url_domain: &str, config_domain: &str) -> bool {
     false
 }
 
-fn escape_domain(domain: &str) -> String {
-    domain.replace('.', r"\.").replace('-', r"\-")
+#[derive(Debug, Clone)]
+struct UboRule {
+    parameter: Box<str>,
+    is_regex: bool,
+    regex: Option<Regex>,
+    domains: Box<[Box<str>]>,
+    excluded_domains: Box<[Box<str>]>,
+    is_global: bool,
 }
 
-fn process_query_string(filter: &QueryFilter, query_str: &str) -> String {
+fn parse_ubo_line(line: &str) -> Option<UboRule> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('!') || line.starts_with('#') {
+        return None;
+    }
+
+    let removeparam_idx = line.find("removeparam")?;
+    let mut left = &line[..removeparam_idx];
+    if left.ends_with('$') || left.ends_with(',') {
+        left = &left[..left.len() - 1];
+    }
+    if left.ends_with('$') || left.ends_with(',') {
+        left = &left[..left.len() - 1];
+    }
+
+    let right = &line[removeparam_idx..];
+    let mut param = "";
+    let mut modifiers = Vec::new();
+
+    if let Some(rest) = right.strip_prefix("removeparam=") {
+        let mut parts = rest.split(',');
+        if let Some(p) = parts.next() {
+            param = p.trim();
+        }
+        for modifier in parts {
+            modifiers.push(modifier.trim());
+        }
+    } else {
+        param = "*";
+    }
+
+    if param.is_empty() {
+        return None;
+    }
+
+    let mut is_regex = false;
+    let clean_param = Box::from(param);
+    let mut regex = None;
+
+    if param.starts_with('/') && param.ends_with('/') && param.len() > 2 {
+        is_regex = true;
+        let regex_pattern = &param[1..param.len() - 1];
+        if let Ok(re) = Regex::new(regex_pattern) {
+            regex = Some(re);
+        } else {
+            return None;
+        }
+    }
+
+    let mut domains = Vec::new();
+    let mut excluded_domains = Vec::new();
+    let mut is_global = true;
+
+    if let Some(stripped) = left.strip_prefix("||") {
+        is_global = false;
+        let mut domain_part = stripped;
+        if domain_part.ends_with('^') {
+            domain_part = &domain_part[..domain_part.len() - 1];
+        }
+        let clean_domain = domain_part.trim_end_matches('/').trim_end_matches('^');
+        domains.push(clean_domain.to_lowercase().into_boxed_str());
+    }
+
+    if let Some(left_modifiers) = left.strip_prefix('$') {
+        for mod_str in left_modifiers.split(',') {
+            modifiers.push(mod_str.trim());
+        }
+    }
+
+    for modifier in modifiers {
+        if let Some(val) = modifier.strip_prefix("domain=") {
+            is_global = false;
+            for d in val.split('|') {
+                let d = d.trim();
+                if let Some(stripped) = d.strip_prefix('~') {
+                    excluded_domains.push(stripped.to_lowercase().into_boxed_str());
+                } else {
+                    domains.push(d.to_lowercase().into_boxed_str());
+                }
+            }
+        } else if let Some(val) = modifier.strip_prefix("to=") {
+            for d in val.split('|') {
+                let d = d.trim();
+                if let Some(stripped) = d.strip_prefix('~') {
+                    excluded_domains.push(stripped.to_lowercase().into_boxed_str());
+                } else {
+                    is_global = false;
+                    domains.push(d.to_lowercase().into_boxed_str());
+                }
+            }
+        }
+    }
+
+    Some(UboRule {
+        parameter: clean_param,
+        is_regex,
+        regex,
+        domains: domains.into_boxed_slice(),
+        excluded_domains: excluded_domains.into_boxed_slice(),
+        is_global,
+    })
+}
+
+fn parse_rules_from_str(content: &str) -> Vec<UboRule> {
+    let mut rules = Vec::new();
+    for line in content.lines() {
+        if let Some(rule) = parse_ubo_line(line) {
+            rules.push(rule);
+        }
+    }
+    rules
+}
+
+fn get_cache_path() -> PathBuf {
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(parent) = exe_path.parent() {
+            let alt_path = parent.join("config.toml");
+            if alt_path.exists() || exe_path.to_string_lossy().contains("AppData") {
+                return parent.join("privacy-removeparam.txt");
+            }
+        }
+    std::env::current_dir()
+        .map(|p| p.join("privacy-removeparam.txt"))
+        .unwrap_or_else(|_| PathBuf::from("privacy-removeparam.txt"))
+}
+
+fn fetch_and_save_rules(cache_path: &std::path::Path) -> Result<String, String> {
+    let url = "https://raw.githubusercontent.com/uBlockOrigin/uAssets/refs/heads/master/filters/privacy-removeparam.txt";
+    
+    let response = minreq::get(url)
+        .with_timeout(10)
+        .send()
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+        
+    let body = response.as_str()
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+        
+    if let Err(e) = std::fs::write(cache_path, body) {
+        log_error!("Failed to write rules to cache file: {}", e);
+    }
+    
+    Ok(body.to_string())
+}
+
+fn should_filter_param(url_domain: &str, param_name: &str, rules: &[UboRule]) -> bool {
+    for rule in rules {
+        let param_matches = if rule.is_regex {
+            if let Some(ref re) = rule.regex {
+                re.is_match(param_name)
+            } else {
+                false
+            }
+        } else {
+            rule.parameter.as_ref() == "*" || rule.parameter.as_ref() == param_name
+        };
+
+        if !param_matches {
+            continue;
+        }
+
+        let mut is_excluded = false;
+        for excl in rule.excluded_domains.iter() {
+            if domain_matches(url_domain, excl) {
+                is_excluded = true;
+                break;
+            }
+        }
+        if is_excluded {
+            continue;
+        }
+
+        if rule.is_global {
+            return true;
+        }
+
+        for rule_dom in rule.domains.iter() {
+            if domain_matches(url_domain, rule_dom) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn process_query_string_ubo(domain: &str, query_str: &str, rules: &[UboRule]) -> String {
     let mut kept_params = Vec::new();
     for pair in query_str.split('&') {
         if pair.is_empty() {
@@ -406,21 +616,9 @@ fn process_query_string(filter: &QueryFilter, query_str: &str) -> String {
         if let Some(key) = parts.next() {
             let value = parts.next().unwrap_or("");
             
-            let mut keep = true;
+            let should_remove = should_filter_param(domain, key, rules);
             
-            if let Some(ref allow_list) = filter.allow {
-                keep = allow_list.iter().any(|allowed_key| allowed_key == key);
-            }
-            
-            if keep {
-                if let Some(ref forbid_list) = filter.forbid {
-                    if forbid_list.iter().any(|forbidden_key| forbidden_key == "*" || forbidden_key == key) {
-                        keep = false;
-                    }
-                }
-            }
-            
-            if keep {
+            if !should_remove {
                 if value.is_empty() {
                     kept_params.push(key.to_string());
                 } else {
@@ -437,28 +635,10 @@ fn process_query_string(filter: &QueryFilter, query_str: &str) -> String {
     }
 }
 
-fn filter_query_parameters(text: &str, query_filters: &[QueryFilter]) -> String {
-    let escaped_domains: Vec<String> = query_filters
-        .iter()
-        .map(|f| escape_domain(&f.domain))
-        .collect();
-
-    if escaped_domains.is_empty() {
-        return text.to_string();
-    }
-
-    let domain_pattern = escaped_domains.join("|");
-    let regex_str = format!(
-        r"(?i)(?:\b(https?://))?(?:\b(www\.))?\b({})\b(/[^?\s#]*)?(\?[^\s#]*)?(#[^\s]*)?",
-        domain_pattern
-    );
-    let url_re = match Regex::new(&regex_str) {
-        Ok(re) => re,
-        Err(e) => {
-            log_error!("Failed to compile dynamic query filter regex: {}", e);
-            return text.to_string();
-        }
-    };
+fn filter_query_parameters(text: &str, ubo_rules: &[UboRule]) -> String {
+    let url_re = Regex::new(
+        r"(?i)(?:\b(https?://))?(?:\b(www\.))?\b([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b(/[^?\s#]*)?(\?[^\s#]*)?(#[^\s]*)?"
+    ).unwrap();
 
     url_re.replace_all(text, |caps: &regex::Captures| {
         let protocol = caps.get(1).map(|m| m.as_str()).unwrap_or("");
@@ -468,48 +648,37 @@ fn filter_query_parameters(text: &str, query_filters: &[QueryFilter]) -> String 
         let query_with_question = caps.get(5).map(|m| m.as_str()).unwrap_or("");
         let fragment = caps.get(6).map(|m| m.as_str()).unwrap_or("");
 
-        // Check if this is part of a longer domain (like youtube.com.my or x.com.ua)
+        if query_with_question.is_empty() {
+            return caps.get(0).unwrap().as_str().to_string();
+        }
+
         let domain_match = caps.get(3).unwrap();
-        if let Some(c) = text[domain_match.end()..].chars().next() {
-            if c == '.' || c.is_alphanumeric() || c == '-' {
+        if let Some(c) = text[domain_match.end()..].chars().next()
+            && (c == '.' || c.is_alphanumeric() || c == '-') {
                 return caps.get(0).unwrap().as_str().to_string();
+            }
+
+        let mut clean_query = String::new();
+        let trailing_punct;
+
+        let mut clean_fragment = String::new();
+        if !fragment.is_empty() {
+            let (f_base, f_punct) = strip_trailing_punctuation(fragment);
+            clean_fragment = f_base.to_string();
+            trailing_punct = f_punct;
+            
+            let query_str = &query_with_question[1..];
+            clean_query = process_query_string_ubo(domain, query_str, ubo_rules);
+        } else {
+            let (q_base, q_punct) = strip_trailing_punctuation(query_with_question);
+            trailing_punct = q_punct;
+            if q_base.len() > 1 {
+                let query_str = &q_base[1..];
+                clean_query = process_query_string_ubo(domain, query_str, ubo_rules);
             }
         }
 
-        // Find matching filter config
-        let filter_config = query_filters.iter().find(|f| domain_matches(domain, &f.domain));
-        
-        let clean_query = if let Some(filter) = filter_config {
-            let mut cq = String::new();
-            let mut trailing_punct = "";
-
-            let mut clean_fragment = String::new();
-            if !fragment.is_empty() {
-                let (f_base, f_punct) = strip_trailing_punctuation(fragment);
-                clean_fragment = f_base.to_string();
-                trailing_punct = f_punct;
-                
-                if !query_with_question.is_empty() {
-                    let query_str = &query_with_question[1..];
-                    cq = process_query_string(filter, query_str);
-                }
-            } else if !query_with_question.is_empty() {
-                let (q_base, q_punct) = strip_trailing_punctuation(query_with_question);
-                trailing_punct = q_punct;
-                if q_base.len() > 1 {
-                    let query_str = &q_base[1..];
-                    cq = process_query_string(filter, query_str);
-                }
-            }
-            
-            // Reconstruct the URL query, fragment, and trailing punctuation
-            format!("{}{}{}", cq, clean_fragment, trailing_punct)
-        } else {
-            // No filter configured, return query, fragment, and punctuation unmodified
-            format!("{}{}", query_with_question, fragment)
-        };
-
-        format!("{}{}{}{}{}", protocol, www, domain, path, clean_query)
+        format!("{}{}{}{}{}{}{}", protocol, www, domain, path, clean_query, clean_fragment, trailing_punct)
     }).into_owned()
 }
 
@@ -522,6 +691,7 @@ fn truncate_str(s: &str, max_len: usize) -> String {
         clean_s
     }
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -568,43 +738,20 @@ mod tests {
 
     #[test]
     fn test_filter_query_parameters() {
-        let query_filters = vec![
-            QueryFilter {
-                domain: "x.com".to_string(),
-                allow: None,
-                forbid: Some(vec!["*".to_string()]),
-            },
-            QueryFilter {
-                domain: "twitter.com".to_string(),
-                allow: None,
-                forbid: Some(vec!["*".to_string()]),
-            },
-            QueryFilter {
-                domain: "fixupx.com".to_string(),
-                allow: None,
-                forbid: Some(vec!["*".to_string()]),
-            },
-            QueryFilter {
-                domain: "fxtwitter.com".to_string(),
-                allow: None,
-                forbid: Some(vec!["*".to_string()]),
-            },
-            QueryFilter {
-                domain: "youtube.com".to_string(),
-                allow: Some(vec!["t".to_string(), "list".to_string(), "v".to_string()]),
-                forbid: None,
-            },
-            QueryFilter {
-                domain: "music.youtube.com".to_string(),
-                allow: Some(vec!["t".to_string(), "list".to_string(), "v".to_string()]),
-                forbid: None,
-            },
-            QueryFilter {
-                domain: "youtu.be".to_string(),
-                allow: Some(vec!["t".to_string(), "list".to_string(), "v".to_string()]),
-                forbid: None,
-            },
-        ];
+        let test_rules_str = r#"
+            $removeparam=utm_source
+            $removeparam=utm_medium
+            $removeparam=utm_campaign
+            $removeparam=utm_term
+            $removeparam=utm_content
+            $removeparam=fbclid
+            $removeparam=gclid
+            $removeparam=si
+            $removeparam=s,domain=twitter.com|x.com
+            $removeparam=cxt,domain=twitter.com|x.com
+            .com/*/status/$removeparam=t,domain=twitter.com|x.com
+        "#;
+        let query_filters = parse_rules_from_str(test_rules_str);
 
         // Twitter/X: strip all queries
         assert_eq!(
@@ -620,14 +767,14 @@ mod tests {
             "x.com/status/123."
         );
 
-        // YouTube: keep only t, list, v
+        // YouTube: remove si
         assert_eq!(
             filter_query_parameters("https://youtube.com/watch?v=abc&si=def&t=10", &query_filters),
             "https://youtube.com/watch?v=abc&t=10"
         );
         assert_eq!(
             filter_query_parameters("https://music.youtube.com/watch?v=abc&si=def&list=xyz&extra=123", &query_filters),
-            "https://music.youtube.com/watch?v=abc&list=xyz"
+            "https://music.youtube.com/watch?v=abc&list=xyz&extra=123"
         );
         assert_eq!(
             filter_query_parameters("youtu.be/abc?si=def&t=5", &query_filters),

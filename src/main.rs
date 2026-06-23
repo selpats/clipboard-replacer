@@ -105,12 +105,12 @@ impl Default for Config {
             replacement: Vec::new(),
             rule: vec![
                 Rule {
-                    pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\bx\.com\b".to_string(),
-                    to: "https://fixupx.com".to_string(),
+                    pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\bx\.com/([a-zA-Z0-9_]{1,15}/status/\d+)".to_string(),
+                    to: "https://fixupx.com/$1".to_string(),
                 },
                 Rule {
-                    pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\btwitter\.com\b".to_string(),
-                    to: "https://fxtwitter.com".to_string(),
+                    pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\btwitter\.com/([a-zA-Z0-9_]{1,15}/status/\d+)".to_string(),
+                    to: "https://fxtwitter.com/$1".to_string(),
                 },
                 Rule {
                     pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\bpixiv\.net/([^/]+/)?artworks/(\d+)".to_string(),
@@ -238,6 +238,40 @@ impl ConfigManager {
     }
 }
 
+fn get_text_with_retry(clipboard: &mut Clipboard) -> Result<String, arboard::Error> {
+    let mut attempts = 0;
+    loop {
+        match clipboard.get_text() {
+            Ok(text) => return Ok(text),
+            Err(arboard::Error::ClipboardOccupied) => {
+                attempts += 1;
+                if attempts >= 5 {
+                    return Err(arboard::Error::ClipboardOccupied);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn set_text_with_retry(clipboard: &mut Clipboard, text: String) -> Result<(), arboard::Error> {
+    let mut attempts = 0;
+    loop {
+        match clipboard.set_text(text.clone()) {
+            Ok(_) => return Ok(()),
+            Err(arboard::Error::ClipboardOccupied) => {
+                attempts += 1;
+                if attempts >= 5 {
+                    return Err(arboard::Error::ClipboardOccupied);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn main() {
     if std::env::args().any(|arg| arg == "--debug" || arg == "-d") {
         DEBUG_MODE.store(true, Ordering::SeqCst);
@@ -310,10 +344,11 @@ fn main() {
     });
 
     let mut last_clipboard_content: Option<String> = None;
-    if let Ok(text) = clipboard.get_text() {
+    if let Ok(text) = get_text_with_retry(&mut clipboard) {
         last_clipboard_content = Some(text);
     }
 
+    let mut last_error_msg: Option<String> = None;
     let mut loop_count: u32 = 0;
 
     loop {
@@ -323,8 +358,9 @@ fn main() {
         }
         loop_count = loop_count.wrapping_add(1);
 
-        match clipboard.get_text() {
+        match get_text_with_retry(&mut clipboard) {
             Ok(current_text) => {
+                last_error_msg = None;
                 let is_new = match &last_clipboard_content {
                     Some(last_text) => last_text != &current_text,
                     None => true,
@@ -365,14 +401,30 @@ fn main() {
 
                     if changed {
                         log_info!("Match detected! Performing replacement...");
-                        match clipboard.set_text(replaced_text.clone()) {
+                        match set_text_with_retry(&mut clipboard, replaced_text.clone()) {
                             Ok(_) => {
                                 log_info!("  Before: {}", truncate_str(&current_text, 60));
                                 log_info!("  After:  {}", truncate_str(&replaced_text, 60));
                                 last_clipboard_content = Some(replaced_text);
                             }
                             Err(e) => {
-                                log_error!("Failed to write to clipboard: {}", e);
+                                let mut is_system_lock = false;
+                                let err_msg = match e {
+                                    arboard::Error::ClipboardOccupied => {
+                                        if let Some(holder) = get_clipboard_holder_info() {
+                                            if holder.contains("LockApp.exe") || holder.contains("LogonUI.exe") {
+                                                is_system_lock = true;
+                                            }
+                                            format!("Clipboard occupied by {}", holder)
+                                        } else {
+                                            "Clipboard occupied by another party".to_string()
+                                        }
+                                    }
+                                    other => other.to_string(),
+                                };
+                                if !is_system_lock {
+                                    log_error!("Failed to write to clipboard: {}", err_msg);
+                                }
                             }
                         }
                     }
@@ -382,14 +434,147 @@ fn main() {
                 if last_clipboard_content.is_some() {
                     last_clipboard_content = None;
                 }
+                last_error_msg = None;
             }
             Err(e) => {
-                log_error!("Clipboard read error: {}", e);
+                let mut is_system_lock = false;
+                let err_msg = match e {
+                    arboard::Error::ClipboardOccupied => {
+                        let holder_info = if let Some(holder) = get_clipboard_holder_info() {
+                            if holder.contains("LockApp.exe") || holder.contains("LogonUI.exe") {
+                                is_system_lock = true;
+                            }
+                            format!("by {}", holder)
+                        } else {
+                            "by another party".to_string()
+                        };
+                        if let Some(ref last_content) = last_clipboard_content {
+                            format!("Clipboard occupied {} (Last known content: '{}')", holder_info, truncate_str(last_content, 60))
+                        } else {
+                            format!("Clipboard occupied {} (Last known content: None)", holder_info)
+                        }
+                    }
+                    other => {
+                        if let Some(ref last_content) = last_clipboard_content {
+                            format!("{} (Last known content: '{}')", other, truncate_str(last_content, 60))
+                        } else {
+                            format!("{} (Last known content: None)", other)
+                        }
+                    }
+                };
+
+                if !is_system_lock {
+                    let should_log = match &last_error_msg {
+                        Some(last) => last != &err_msg,
+                        None => true,
+                    };
+
+                    if should_log {
+                        log_error!("Clipboard read error: {}", err_msg);
+                        last_error_msg = Some(err_msg);
+                    }
+                } else {
+                    last_error_msg = Some(err_msg);
+                }
             }
         }
 
         thread::sleep(Duration::from_millis(500));
     }
+}
+
+#[cfg(windows)]
+fn get_clipboard_holder_info() -> Option<String> {
+    use std::ffi::c_void;
+    use std::path::PathBuf;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetOpenClipboardWindow() -> *mut c_void;
+        fn GetWindowThreadProcessId(hwnd: *mut c_void, lpdw_process_id: *mut u32) -> u32;
+        fn GetForegroundWindow() -> *mut c_void;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(
+            dw_desired_access: u32,
+            b_inherit_handle: i32,
+            dw_process_id: u32,
+        ) -> *mut c_void;
+        fn QueryFullProcessImageNameW(
+            h_process: *mut c_void,
+            dw_flags: u32,
+            lp_exe_name: *mut u16,
+            lpdw_size: *mut u32,
+        ) -> i32;
+        fn CloseHandle(h_object: *mut c_void) -> i32;
+    }
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+
+    unsafe {
+        let mut hwnd = GetOpenClipboardWindow();
+        let mut is_direct_owner = true;
+        if hwnd.is_null() {
+            hwnd = GetForegroundWindow();
+            is_direct_owner = false;
+        }
+        if hwnd.is_null() {
+            return None;
+        }
+
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == 0 {
+            if is_direct_owner {
+                return Some("Unknown Process (PID 0)".to_string());
+            } else {
+                return Some("Unknown Process (PID 0) (Foreground Window)".to_string());
+            }
+        }
+
+        let process_handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process_handle.is_null() {
+            if is_direct_owner {
+                return Some(format!("Unknown Process (PID {})", pid));
+            } else {
+                return Some(format!("Unknown Process (PID {}) (Foreground Window)", pid));
+            }
+        }
+
+        let mut buf = [0u16; 1024];
+        let mut size = buf.len() as u32;
+        let success = QueryFullProcessImageNameW(process_handle, 0, buf.as_mut_ptr(), &mut size);
+        CloseHandle(process_handle);
+
+        if success != 0 && size > 0 {
+            let path_os = String::from_utf16_lossy(&buf[..size as usize]);
+            let path = PathBuf::from(path_os);
+            let name_str = if let Some(name) = path.file_name() {
+                name.to_string_lossy().into_owned()
+            } else {
+                path.to_string_lossy().into_owned()
+            };
+
+            if is_direct_owner {
+                return Some(format!("{} (PID {})", name_str, pid));
+            } else {
+                return Some(format!("{} (PID {}) (Foreground Window)", name_str, pid));
+            }
+        }
+
+        if is_direct_owner {
+            Some(format!("Unknown Process (PID {})", pid))
+        } else {
+            Some(format!("Unknown Process (PID {}) (Foreground Window)", pid))
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn get_clipboard_holder_info() -> Option<String> {
+    None
 }
 
 fn strip_trailing_punctuation(s: &str) -> (&str, &str) {
@@ -769,21 +954,24 @@ mod tests {
 
     #[test]
     fn test_x_and_twitter_regex() {
-        let re_x = Regex::new(r"(?:\bhttps?://)?(?:\bwww\.)?\bx\.com\b").unwrap();
-        let re_tw = Regex::new(r"(?:\bhttps?://)?(?:\bwww\.)?\btwitter\.com\b").unwrap();
+        let re_x = Regex::new(r"(?:\bhttps?://)?(?:\bwww\.)?\bx\.com/([a-zA-Z0-9_]{1,15}/status/\d+)").unwrap();
+        let re_tw = Regex::new(r"(?:\bhttps?://)?(?:\bwww\.)?\btwitter\.com/([a-zA-Z0-9_]{1,15}/status/\d+)").unwrap();
 
-        // Check x.com with and without protocol
-        assert_eq!(re_x.replace_all("x.com/mrsnanapple/status/123", "https://fixupx.com"), "https://fixupx.com/mrsnanapple/status/123");
-        assert_eq!(re_x.replace_all("https://x.com/mrsnanapple/status/123", "https://fixupx.com"), "https://fixupx.com/mrsnanapple/status/123");
-        assert_eq!(re_x.replace_all("http://www.x.com/mrsnanapple/status/123", "https://fixupx.com"), "https://fixupx.com/mrsnanapple/status/123");
+        // Check x.com statuses with and without protocol
+        assert_eq!(re_x.replace_all("x.com/mrsnanapple/status/123", "https://fixupx.com/$1"), "https://fixupx.com/mrsnanapple/status/123");
+        assert_eq!(re_x.replace_all("https://x.com/mrsnanapple/status/123", "https://fixupx.com/$1"), "https://fixupx.com/mrsnanapple/status/123");
+        assert_eq!(re_x.replace_all("http://www.x.com/mrsnanapple/status/123", "https://fixupx.com/$1"), "https://fixupx.com/mrsnanapple/status/123");
 
-        // Check twitter.com with and without protocol
-        assert_eq!(re_tw.replace_all("twitter.com/user/status/123", "https://fxtwitter.com"), "https://fxtwitter.com/user/status/123");
-        assert_eq!(re_tw.replace_all("https://twitter.com/user/status/123", "https://fxtwitter.com"), "https://fxtwitter.com/user/status/123");
+        // Check twitter.com statuses with and without protocol
+        assert_eq!(re_tw.replace_all("twitter.com/user/status/123", "https://fxtwitter.com/$1"), "https://fxtwitter.com/user/status/123");
+        assert_eq!(re_tw.replace_all("https://twitter.com/user/status/123", "https://fxtwitter.com/$1"), "https://fxtwitter.com/user/status/123");
+
+        // Check that profiles are NOT replaced
+        assert_eq!(re_x.replace_all("https://x.com/arocro07", "https://fixupx.com/$1"), "https://x.com/arocro07");
+        assert_eq!(re_tw.replace_all("https://twitter.com/user", "https://fxtwitter.com/$1"), "https://twitter.com/user");
 
         // Check that other domains ending in x.com are NOT replaced
-        assert_eq!(re_x.replace_all("index.com", "https://fixupx.com"), "index.com");
-        assert_eq!(re_x.replace_all("alex.com", "https://fixupx.com"), "alex.com");
+        assert_eq!(re_x.replace_all("index.com/user/status/123", "https://fixupx.com/$1"), "index.com/user/status/123");
     }
 
     #[test]

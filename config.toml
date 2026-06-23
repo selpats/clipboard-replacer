@@ -3,12 +3,12 @@
 # to = 'https://fixupx.com'
 
 [[rule]]
-pattern = '(?:\bhttps?://)?(?:\bwww\.)?\bx\.com\b'
-to = 'https://fixupx.com'
+pattern = '(?:\bhttps?://)?(?:\bwww\.)?\bx\.com/([a-zA-Z0-9_]{1,15}/status/\d+)'
+to = 'https://fixupx.com/$1'
 
 [[rule]]
-pattern = '(?:\bhttps?://)?(?:\bwww\.)?\btwitter\.com\b'
-to = 'https://fxtwitter.com'
+pattern = '(?:\bhttps?://)?(?:\bwww\.)?\btwitter\.com/([a-zA-Z0-9_]{1,15}/status/\d+)'
+to = 'https://fxtwitter.com/$1'
 
 [[rule]]
 pattern = '(?:\bhttps?://)?(?:\bwww\.)?\bpixiv\.net/([^/]+/)?artworks/(\d+)'

@@ -11,5 +11,5 @@ pattern = '(?:\bhttps?://)?(?:\bwww\.)?\bpixiv\.net/([^/]+/)?artworks/(\d+)'
 to = 'https://phixiv.net/${1}artworks/$2'
 
 [[rule]]
-pattern = '(?:\bhttps?://)?(?:\bwww\.)?\binstagram\.com/((?:p|reel|share)/[^/\s?#]+/?|stories/[a-zA-Z0-9_.]+(?:/[^/\s?#]+/?)?|[a-zA-Z0-9_.]+/p/[^/\s?#]+/?)'
+pattern = '(?:\bhttps?://)?(?:\bwww\.)?\binstagram\.com/((?:p|reel|share)/[^/\s?#]+/?|stories/[a-zA-Z0-9_.]+(?:/[^/\s?#]+/?)?|[a-zA-Z0-9_.]+(?:/p|/reel)/[^/\s?#]+/?)'
 to = 'https://vxinstagram.com/$1'

@@ -113,7 +113,7 @@ impl Default for Config {
                     to: "https://phixiv.net/${1}artworks/$2".to_string(),
                 },
                 Rule {
-                    pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\binstagram\.com/((?:p|reel|share)/[^/\s?#]+/?|stories/[a-zA-Z0-9_.]+(?:/[^/\s?#]+/?)?|[a-zA-Z0-9_.]+/p/[^/\s?#]+/?)".to_string(),
+                    pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\binstagram\.com/((?:p|reel|share)/[^/\s?#]+/?|stories/[a-zA-Z0-9_.]+(?:/[^/\s?#]+/?)?|[a-zA-Z0-9_.]+(?:/p|/reel)/[^/\s?#]+/?)".to_string(),
                     to: "https://vxinstagram.com/$1".to_string(),
                 },
             ],
@@ -975,7 +975,7 @@ mod tests {
 
     #[test]
     fn test_instagram_regex() {
-        let re = Regex::new(r"(?:\bhttps?://)?(?:\bwww\.)?\binstagram\.com/((?:p|reel|share)/[^/\s?#]+/?|stories/[a-zA-Z0-9_.]+(?:/[^/\s?#]+/?)?|[a-zA-Z0-9_.]+/p/[^/\s?#]+/?)").unwrap();
+        let re = Regex::new(r"(?:\bhttps?://)?(?:\bwww\.)?\binstagram\.com/((?:p|reel|share)/[^/\s?#]+/?|stories/[a-zA-Z0-9_.]+(?:/[^/\s?#]+/?)?|[a-zA-Z0-9_.]+(?:/p|/reel)/[^/\s?#]+/?)").unwrap();
 
         // 1. instagram.com/p/...
         assert_eq!(re.replace_all("instagram.com/p/CoD2-NPI2D_", "https://vxinstagram.com/$1"), "https://vxinstagram.com/p/CoD2-NPI2D_");
@@ -988,8 +988,9 @@ mod tests {
         assert_eq!(re.replace_all("instagram.com/stories/username.test/12345", "https://vxinstagram.com/$1"), "https://vxinstagram.com/stories/username.test/12345");
         assert_eq!(re.replace_all("https://instagram.com/stories/username_test/", "https://vxinstagram.com/$1"), "https://vxinstagram.com/stories/username_test/");
 
-        // 4. instagram.com/username/p/...
+        // 4. instagram.com/username/p/... and instagram.com/username/reel/...
         assert_eq!(re.replace_all("https://instagram.com/username.test/p/CoD2-NPI2D_", "https://vxinstagram.com/$1"), "https://vxinstagram.com/username.test/p/CoD2-NPI2D_");
+        assert_eq!(re.replace_all("https://instagram.com/username.test/reel/CoD2-NPI2D_", "https://vxinstagram.com/$1"), "https://vxinstagram.com/username.test/reel/CoD2-NPI2D_");
 
         // 5. instagram.com/share/...
         assert_eq!(re.replace_all("instagram.com/share/xxxx", "https://vxinstagram.com/$1"), "https://vxinstagram.com/share/xxxx");

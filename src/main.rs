@@ -105,16 +105,16 @@ impl Default for Config {
             replacement: Vec::new(),
             rule: vec![
                 Rule {
-                    pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\bx\.com/([a-zA-Z0-9_]{1,15}/status/\d+)".to_string(),
+                    pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\b(?:x|twitter)\.com/([a-zA-Z0-9_]{1,15}/status/\d+)".to_string(),
                     to: "https://fixupx.com/$1".to_string(),
-                },
-                Rule {
-                    pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\btwitter\.com/([a-zA-Z0-9_]{1,15}/status/\d+)".to_string(),
-                    to: "https://fxtwitter.com/$1".to_string(),
                 },
                 Rule {
                     pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\bpixiv\.net/([^/]+/)?artworks/(\d+)".to_string(),
                     to: "https://phixiv.net/${1}artworks/$2".to_string(),
+                },
+                Rule {
+                    pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\binstagram\.com/((?:p|reel|share)/[^/\s?#]+/?|stories/[a-zA-Z0-9_.]+(?:/[^/\s?#]+/?)?|[a-zA-Z0-9_.]+/p/[^/\s?#]+/?)".to_string(),
+                    to: "https://vxinstagram.com/$1".to_string(),
                 },
             ],
         }
@@ -954,24 +954,50 @@ mod tests {
 
     #[test]
     fn test_x_and_twitter_regex() {
-        let re_x = Regex::new(r"(?:\bhttps?://)?(?:\bwww\.)?\bx\.com/([a-zA-Z0-9_]{1,15}/status/\d+)").unwrap();
-        let re_tw = Regex::new(r"(?:\bhttps?://)?(?:\bwww\.)?\btwitter\.com/([a-zA-Z0-9_]{1,15}/status/\d+)").unwrap();
+        let re = Regex::new(r"(?:\bhttps?://)?(?:\bwww\.)?\b(?:x|twitter)\.com/([a-zA-Z0-9_]{1,15}/status/\d+)").unwrap();
 
         // Check x.com statuses with and without protocol
-        assert_eq!(re_x.replace_all("x.com/mrsnanapple/status/123", "https://fixupx.com/$1"), "https://fixupx.com/mrsnanapple/status/123");
-        assert_eq!(re_x.replace_all("https://x.com/mrsnanapple/status/123", "https://fixupx.com/$1"), "https://fixupx.com/mrsnanapple/status/123");
-        assert_eq!(re_x.replace_all("http://www.x.com/mrsnanapple/status/123", "https://fixupx.com/$1"), "https://fixupx.com/mrsnanapple/status/123");
+        assert_eq!(re.replace_all("x.com/mrsnanapple/status/123", "https://fixupx.com/$1"), "https://fixupx.com/mrsnanapple/status/123");
+        assert_eq!(re.replace_all("https://x.com/mrsnanapple/status/123", "https://fixupx.com/$1"), "https://fixupx.com/mrsnanapple/status/123");
+        assert_eq!(re.replace_all("http://www.x.com/mrsnanapple/status/123", "https://fixupx.com/$1"), "https://fixupx.com/mrsnanapple/status/123");
 
         // Check twitter.com statuses with and without protocol
-        assert_eq!(re_tw.replace_all("twitter.com/user/status/123", "https://fxtwitter.com/$1"), "https://fxtwitter.com/user/status/123");
-        assert_eq!(re_tw.replace_all("https://twitter.com/user/status/123", "https://fxtwitter.com/$1"), "https://fxtwitter.com/user/status/123");
+        assert_eq!(re.replace_all("twitter.com/user/status/123", "https://fixupx.com/$1"), "https://fixupx.com/user/status/123");
+        assert_eq!(re.replace_all("https://twitter.com/user/status/123", "https://fixupx.com/$1"), "https://fixupx.com/user/status/123");
 
         // Check that profiles are NOT replaced
-        assert_eq!(re_x.replace_all("https://x.com/arocro07", "https://fixupx.com/$1"), "https://x.com/arocro07");
-        assert_eq!(re_tw.replace_all("https://twitter.com/user", "https://fxtwitter.com/$1"), "https://twitter.com/user");
+        assert_eq!(re.replace_all("https://x.com/arocro07", "https://fixupx.com/$1"), "https://x.com/arocro07");
+        assert_eq!(re.replace_all("https://twitter.com/user", "https://fixupx.com/$1"), "https://twitter.com/user");
 
         // Check that other domains ending in x.com are NOT replaced
-        assert_eq!(re_x.replace_all("index.com/user/status/123", "https://fixupx.com/$1"), "index.com/user/status/123");
+        assert_eq!(re.replace_all("index.com/user/status/123", "https://fixupx.com/$1"), "index.com/user/status/123");
+    }
+
+    #[test]
+    fn test_instagram_regex() {
+        let re = Regex::new(r"(?:\bhttps?://)?(?:\bwww\.)?\binstagram\.com/((?:p|reel|share)/[^/\s?#]+/?|stories/[a-zA-Z0-9_.]+(?:/[^/\s?#]+/?)?|[a-zA-Z0-9_.]+/p/[^/\s?#]+/?)").unwrap();
+
+        // 1. instagram.com/p/...
+        assert_eq!(re.replace_all("instagram.com/p/CoD2-NPI2D_", "https://vxinstagram.com/$1"), "https://vxinstagram.com/p/CoD2-NPI2D_");
+        assert_eq!(re.replace_all("https://www.instagram.com/p/CoD2-NPI2D_/", "https://vxinstagram.com/$1"), "https://vxinstagram.com/p/CoD2-NPI2D_/");
+
+        // 2. instagram.com/reel/...
+        assert_eq!(re.replace_all("https://instagram.com/reel/CoD2-NPI2D_", "https://vxinstagram.com/$1"), "https://vxinstagram.com/reel/CoD2-NPI2D_");
+
+        // 3. instagram.com/stories/username/...
+        assert_eq!(re.replace_all("instagram.com/stories/username.test/12345", "https://vxinstagram.com/$1"), "https://vxinstagram.com/stories/username.test/12345");
+        assert_eq!(re.replace_all("https://instagram.com/stories/username_test/", "https://vxinstagram.com/$1"), "https://vxinstagram.com/stories/username_test/");
+
+        // 4. instagram.com/username/p/...
+        assert_eq!(re.replace_all("https://instagram.com/username.test/p/CoD2-NPI2D_", "https://vxinstagram.com/$1"), "https://vxinstagram.com/username.test/p/CoD2-NPI2D_");
+
+        // 5. instagram.com/share/...
+        assert_eq!(re.replace_all("instagram.com/share/xxxx", "https://vxinstagram.com/$1"), "https://vxinstagram.com/share/xxxx");
+
+        // 6. Profiles and other links that should NOT match
+        assert_eq!(re.replace_all("https://instagram.com/username", "https://vxinstagram.com/$1"), "https://instagram.com/username");
+        assert_eq!(re.replace_all("https://instagram.com/username/", "https://vxinstagram.com/$1"), "https://instagram.com/username/");
+        assert_eq!(re.replace_all("https://instagram.com/about/us", "https://vxinstagram.com/$1"), "https://instagram.com/about/us");
     }
 
     #[test]

@@ -3,13 +3,13 @@
 # to = 'https://fixupx.com'
 
 [[rule]]
-pattern = '(?:\bhttps?://)?(?:\bwww\.)?\bx\.com/([a-zA-Z0-9_]{1,15}/status/\d+)'
+pattern = '(?:\bhttps?://)?(?:\bwww\.)?\b(?:x|twitter)\.com/([a-zA-Z0-9_]{1,15}/status/\d+)'
 to = 'https://fixupx.com/$1'
-
-[[rule]]
-pattern = '(?:\bhttps?://)?(?:\bwww\.)?\btwitter\.com/([a-zA-Z0-9_]{1,15}/status/\d+)'
-to = 'https://fxtwitter.com/$1'
 
 [[rule]]
 pattern = '(?:\bhttps?://)?(?:\bwww\.)?\bpixiv\.net/([^/]+/)?artworks/(\d+)'
 to = 'https://phixiv.net/${1}artworks/$2'
+
+[[rule]]
+pattern = '(?:\bhttps?://)?(?:\bwww\.)?\binstagram\.com/((?:p|reel|share)/[^/\s?#]+/?|stories/[a-zA-Z0-9_.]+(?:/[^/\s?#]+/?)?|[a-zA-Z0-9_.]+/p/[^/\s?#]+/?)'
+to = 'https://vxinstagram.com/$1'

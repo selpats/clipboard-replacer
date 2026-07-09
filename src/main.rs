@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::thread;
 
 static DEBUG_MODE: AtomicBool = AtomicBool::new(false);
@@ -245,10 +245,10 @@ fn get_text_with_retry(clipboard: &mut Clipboard) -> Result<String, arboard::Err
             Ok(text) => return Ok(text),
             Err(arboard::Error::ClipboardOccupied) => {
                 attempts += 1;
-                if attempts >= 5 {
+                if attempts >= 10 {
                     return Err(arboard::Error::ClipboardOccupied);
                 }
-                std::thread::sleep(Duration::from_millis(20));
+                std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => return Err(e),
         }
@@ -262,10 +262,10 @@ fn set_text_with_retry(clipboard: &mut Clipboard, text: String) -> Result<(), ar
             Ok(_) => return Ok(()),
             Err(arboard::Error::ClipboardOccupied) => {
                 attempts += 1;
-                if attempts >= 5 {
+                if attempts >= 10 {
                     return Err(arboard::Error::ClipboardOccupied);
                 }
-                std::thread::sleep(Duration::from_millis(20));
+                std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => return Err(e),
         }
@@ -809,11 +809,10 @@ fn should_filter_param(url_domain: &str, full_url: &str, param_name: &str, rules
             continue;
         }
 
-        if let Some(ref url_re) = rule.url_pattern {
-            if !url_re.is_match(full_url) {
+        if let Some(ref url_re) = rule.url_pattern
+            && !url_re.is_match(full_url) {
                 continue;
             }
-        }
 
         let mut is_excluded = false;
         for excl in rule.excluded_domains.iter() {
@@ -846,19 +845,12 @@ fn process_query_string_ubo(domain: &str, full_url: &str, query_str: &str, rules
         if pair.is_empty() {
             continue;
         }
-        let mut parts = pair.splitn(2, '=');
-        if let Some(key) = parts.next() {
-            let value = parts.next().unwrap_or("");
-            
-            let should_remove = should_filter_param(domain, full_url, key, rules);
-            
-            if !should_remove {
-                if value.is_empty() {
-                    kept_params.push(key.to_string());
-                } else {
-                    kept_params.push(format!("{}={}", key, value));
-                }
-            }
+        let key = pair.split('=').next().unwrap_or("");
+        
+        let should_remove = should_filter_param(domain, full_url, key, rules);
+        
+        if !should_remove {
+            kept_params.push(pair.to_string());
         }
     }
     
@@ -869,12 +861,12 @@ fn process_query_string_ubo(domain: &str, full_url: &str, query_str: &str, rules
     }
 }
 
-fn filter_query_parameters(text: &str, ubo_rules: &[UboRule]) -> String {
-    let url_re = Regex::new(
-        r"(?i)(?:\b(https?://))?(?:\b(www\.))?\b([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b(/[^?\s#]*)?(\?[^\s#]*)?(#[^\s]*)?"
-    ).unwrap();
+static URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:\b(https?://))?(?:\b(www\.))?\b([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b(/[^?\s#]*)?(\?[^\s#]*)?(#[^\s]*)?").unwrap()
+});
 
-    url_re.replace_all(text, |caps: &regex::Captures| {
+fn filter_query_parameters(text: &str, ubo_rules: &[UboRule]) -> String {
+    URL_RE.replace_all(text, |caps: &regex::Captures| {
         let protocol = caps.get(1).map(|m| m.as_str()).unwrap_or("");
         let www = caps.get(2).map(|m| m.as_str()).unwrap_or("");
         let domain = caps.get(3).map(|m| m.as_str()).unwrap_or("");

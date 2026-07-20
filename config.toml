@@ -13,3 +13,7 @@ to = 'https://phixiv.net/${1}artworks/$2'
 [[rule]]
 pattern = '(?:\bhttps?://)?(?:\bwww\.)?\binstagram\.com/((?:p|reel|share)/[^/\s?#]+/?|stories/[a-zA-Z0-9_.]+(?:/[^/\s?#]+/?)?|[a-zA-Z0-9_.]+(?:/p|/reel)/[^/\s?#]+/?)'
 to = 'https://vxinstagram.com/$1'
+
+[[rule]]
+pattern = '(?i)(\bmusic\.youtube\.com/[^\s]*?)[?&]si=[^&\s]+'
+to = '$1'

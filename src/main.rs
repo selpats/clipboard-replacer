@@ -116,6 +116,10 @@ impl Default for Config {
                     pattern: r"(?:\bhttps?://)?(?:\bwww\.)?\binstagram\.com/((?:p|reel|share)/[^/\s?#]+/?|stories/[a-zA-Z0-9_.]+(?:/[^/\s?#]+/?)?|[a-zA-Z0-9_.]+(?:/p|/reel)/[^/\s?#]+/?)".to_string(),
                     to: "https://vxinstagram.com/$1".to_string(),
                 },
+                Rule {
+                    pattern: r"(?i)(\bmusic\.youtube\.com/[^\s]*?)[?&]si=[^&\s]+".to_string(),
+                    to: "$1".to_string(),
+                },
             ],
         }
     }
@@ -645,27 +649,30 @@ fn parse_ubo_line(line: &str) -> Option<UboRule> {
     }
 
     let removeparam_idx = line.find("removeparam")?;
-    let mut left = &line[..removeparam_idx];
-    if left.ends_with('$') || left.ends_with(',') {
-        left = &left[..left.len() - 1];
+    
+    // The part before removeparam
+    let mut before_removeparam = &line[..removeparam_idx];
+    if before_removeparam.ends_with(',') {
+        before_removeparam = &before_removeparam[..before_removeparam.len() - 1];
     }
-    if left.ends_with('$') || left.ends_with(',') {
-        left = &left[..left.len() - 1];
-    }
-
-    let left_clean = left.trim();
-    let mut url_pattern = None;
-    if !left_clean.is_empty()
-        && !left_clean.starts_with("||")
-        && !left_clean.starts_with('$')
-        && left_clean != "*"
-    {
-        url_pattern = wildcard_to_regex(left_clean);
+    
+    // Split into pattern and modifiers on the first '$'
+    let mut pattern_part = before_removeparam;
+    let mut modifiers = Vec::new();
+    
+    if let Some(dollar_idx) = before_removeparam.find('$') {
+        pattern_part = &before_removeparam[..dollar_idx];
+        let mods = &before_removeparam[dollar_idx + 1..];
+        for mod_str in mods.split(',') {
+            let m = mod_str.trim();
+            if !m.is_empty() {
+                modifiers.push(m);
+            }
+        }
     }
 
     let right = &line[removeparam_idx..];
     let mut param = "";
-    let mut modifiers = Vec::new();
 
     if let Some(rest) = right.strip_prefix("removeparam=") {
         let mut parts = rest.split(',');
@@ -673,7 +680,10 @@ fn parse_ubo_line(line: &str) -> Option<UboRule> {
             param = p.trim();
         }
         for modifier in parts {
-            modifiers.push(modifier.trim());
+            let m = modifier.trim();
+            if !m.is_empty() {
+                modifiers.push(m);
+            }
         }
     } else {
         param = "*";
@@ -700,21 +710,36 @@ fn parse_ubo_line(line: &str) -> Option<UboRule> {
     let mut domains = Vec::new();
     let mut excluded_domains = Vec::new();
     let mut is_global = true;
+    let mut url_pattern = None;
+    
+    let pattern_clean = pattern_part.trim();
 
-    if let Some(stripped) = left.strip_prefix("||") {
+    if let Some(stripped) = pattern_clean.strip_prefix("||") {
         is_global = false;
-        let mut domain_part = stripped;
-        if domain_part.ends_with('^') {
-            domain_part = &domain_part[..domain_part.len() - 1];
+        
+        let domain_part;
+        let mut path_part = "";
+        
+        if let Some(idx) = stripped.find(|c| c == '/' || c == '^' || c == '?') {
+            domain_part = &stripped[..idx];
+            path_part = &stripped[idx..];
+        } else {
+            domain_part = stripped;
         }
-        let clean_domain = domain_part.trim_end_matches('/').trim_end_matches('^');
-        domains.push(clean_domain.to_lowercase().into_boxed_str());
-    }
 
-    if let Some(left_modifiers) = left.strip_prefix('$') {
-        for mod_str in left_modifiers.split(',') {
-            modifiers.push(mod_str.trim());
+        let clean_domain = domain_part;
+        domains.push(clean_domain.to_lowercase().into_boxed_str());
+        
+        if !path_part.is_empty() && path_part != "^" {
+            let mut pattern = String::from(clean_domain);
+            pattern.push_str(path_part);
+            if pattern.ends_with('^') {
+                pattern.pop(); // Remove trailing ^ for the url pattern match
+            }
+            url_pattern = wildcard_to_regex(&pattern);
         }
+    } else if !pattern_clean.is_empty() && pattern_clean != "*" {
+        url_pattern = wildcard_to_regex(pattern_clean);
     }
 
     for modifier in modifiers {
@@ -1040,6 +1065,27 @@ mod tests {
         assert_eq!(
             filter_query_parameters("youtu.be/abc?si=def", &query_filters),
             "youtu.be/abc"
+        );
+        
+        // Path-based rules
+        let path_rules_str = r#"
+            ||youtube.com/shorts/$removeparam=si
+            ://youtube.com/@*?si=$removeparam=si
+        "#;
+        let path_filters = parse_rules_from_str(path_rules_str);
+        
+        assert_eq!(
+            filter_query_parameters("https://youtube.com/shorts/123?si=456", &path_filters),
+            "https://youtube.com/shorts/123"
+        );
+        assert_eq!(
+            filter_query_parameters("https://youtube.com/@username?si=456", &path_filters),
+            "https://youtube.com/@username"
+        );
+        // It should NOT match music.youtube.com/playlist
+        assert_eq!(
+            filter_query_parameters("https://music.youtube.com/playlist?list=123&si=456", &path_filters),
+            "https://music.youtube.com/playlist?list=123&si=456"
         );
         
         // Complex text containing links

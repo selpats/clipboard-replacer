@@ -13,7 +13,6 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 
-
 // Get the path for a log file
 fn get_log_path(filename: &str) -> PathBuf {
     if let Ok(exe_path) = std::env::current_exe()
@@ -594,16 +593,16 @@ fn strip_trailing_punctuation(s: &str) -> (&str, &str) {
     (&s[..end_idx], &s[end_idx..])
 }
 
-fn domain_matches(url_domain: &str, config_domain: &str) -> bool {
-    let url_domain_lower = url_domain.to_lowercase();
-    let config_domain_lower = config_domain.to_lowercase();
-    
+fn domain_matches(url_domain_lower: &str, config_domain_lower: &str) -> bool {
     if url_domain_lower == config_domain_lower {
         return true;
     }
     
-    if url_domain_lower.ends_with(&format!(".{}", config_domain_lower)) {
-        return true;
+    if url_domain_lower.ends_with(config_domain_lower) {
+        let prefix_len = url_domain_lower.len() - config_domain_lower.len();
+        if prefix_len > 0 && url_domain_lower.as_bytes()[prefix_len - 1] == b'.' {
+            return true;
+        }
     }
     
     false
@@ -803,19 +802,31 @@ fn get_cache_path() -> PathBuf {
 fn fetch_and_save_rules(cache_path: &std::path::Path) -> Result<String, String> {
     let url = "https://raw.githubusercontent.com/uBlockOrigin/uAssets/refs/heads/master/filters/privacy-removeparam.txt";
     
-    let response = minreq::get(url)
-        .with_timeout(10)
-        .send()
-        .map_err(|e| format!("HTTP request failed: {}", e))?;
+    let mut cmd = std::process::Command::new("curl.exe");
+    cmd.args(["-s", "-f", "--max-time", "10", url]);
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    
+    let output = cmd.output()
+        .map_err(|e| format!("Failed to execute curl: {}", e))?;
         
-    let body = response.as_str()
-        .map_err(|e| format!("Failed to read response body: {}", e))?;
+    if !output.status.success() {
+        return Err(format!("curl returned error status: {}", output.status));
+    }
+    
+    let body = String::from_utf8(output.stdout)
+        .map_err(|e| format!("Failed to parse response as UTF-8: {}", e))?;
         
-    if let Err(e) = std::fs::write(cache_path, body) {
+    if let Err(e) = std::fs::write(cache_path, &body) {
         log_error!("Failed to write rules to cache file: {}", e);
     }
     
-    Ok(body.to_string())
+    Ok(body)
 }
 
 fn should_filter_param(url_domain: &str, full_url: &str, param_name: &str, rules: &[UboRule]) -> bool {
@@ -866,13 +877,15 @@ fn should_filter_param(url_domain: &str, full_url: &str, param_name: &str, rules
 
 fn process_query_string_ubo(domain: &str, full_url: &str, query_str: &str, rules: &[UboRule]) -> String {
     let mut kept_params = Vec::new();
+    let domain_lower = domain.to_lowercase();
+    
     for pair in query_str.split('&') {
         if pair.is_empty() {
             continue;
         }
         let key = pair.split('=').next().unwrap_or("");
         
-        let should_remove = should_filter_param(domain, full_url, key, rules);
+        let should_remove = should_filter_param(&domain_lower, full_url, key, rules);
         
         if !should_remove {
             kept_params.push(pair.to_string());
